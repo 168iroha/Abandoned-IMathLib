@@ -1,4 +1,3 @@
-<script src="http://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
 # expression_template
 　`expression_template.hpp`をインクルードすることにより`expression_template`の全てを利用をすることができます。
 　`expression_template backup1`は`expression_template`の一番古いバックアップで、expression_templateで二項演算を
