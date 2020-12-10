@@ -1,0 +1,2 @@
+# Abandoned-IMathLib
+IMathLibの作成の際に挫折したり断念したり破綻した機能をまとめておく場所
