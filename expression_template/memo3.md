@@ -1,5 +1,3 @@
-#version[1]
-
  - [Expression templateと数式処理](https://qiita.com/168irohairoha/items/beecd2e12a56dd0eda3c)
  - [Expression templateと数式処理2](https://qiita.com/168irohairoha/items/79c2fd468a7b5458103f)
 
