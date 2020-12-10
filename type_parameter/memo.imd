@@ -1,0 +1,459 @@
+#動機
+テンプレートパラメータに複素数型とかの値を持てたらとても便利。
+
+#理論
+理論といってもそこまで理論してない。
+非型テンプレートパラメータとして型を表現するのではなく、値を一対一に対応させるための型を用意してやればいいということ。ただし、例外として整数パラメータは用いるものとする。もちろんなくてもできるが、大した理由もなく便利な機能を使わないのは愚の骨頂である。[Expression template](https://qiita.com/168irohairoha/items/beecd2e12a56dd0eda3c)？あれは数式処理をするためといった大義名分があるから(ステマ)。
+イメージとしては複素数であれば
+
+```C++
+template <class T, class Param>
+struct make_parameter;
+//ReとImはそれぞれT用のmake_parameter
+template <class T, class Re, class Im>
+struct make_parameter<complex<T>, type_tuple<Re, Im>> {
+	using type = complex<T>;
+	static constexpr type value = type(Re::value, Im::value);
+};
+```
+
+みたいな感じ。
+演算をも定義すると尚良である。
+
+#型の実装
+##整数型
+まずは一番簡単である整数型から実装をする。特に解説する意義もないため以下コード。
+
+```C++
+	//あらゆる非型テンプレートを渡すため補助テンプレート
+	template <class T, class Param>
+	struct make_parameter;
+
+	//整数パラメータの場合
+#define MAKE_PARAMETER(NAME)\
+	template <NAME Val>\
+	struct make_parameter<NAME, index_tuple<NAME, Val>> {\
+		using type = NAME;\
+		static constexpr type value = Val;\
+	};
+	MAKE_PARAMETER(bool);
+	MAKE_PARAMETER(char);
+	MAKE_PARAMETER(unsigned char);
+	MAKE_PARAMETER(wchar_t);
+	MAKE_PARAMETER(short);
+	MAKE_PARAMETER(unsigned short);
+	MAKE_PARAMETER(int);
+	MAKE_PARAMETER(unsigned int);
+	MAKE_PARAMETER(long);
+	MAKE_PARAMETER(unsigned long);
+	MAKE_PARAMETER(char16_t);
+	MAKE_PARAMETER(char32_t);
+	MAKE_PARAMETER(long long);
+	MAKE_PARAMETER(unsigned long long);
+#undef MAKE_PARAMETER
+
+	template <class T, T Val>
+	using int_parameter = make_parameter<T, index_tuple<T, Val>>;
+```
+
+##浮動小数点型
+浮動小数点型を扱うことができるようにするのが多分一番面倒である。
+仕組みとしては、浮動小数点型と同じビット長の整数型に浮動小数点型の内部表現のビット列をそのままコピーして、その整数型を保持するといったものである。C++20以前であると仮数部や指数部のビット長を考慮しながら自力で何とかしなければならなくなる。しかも、丸め誤差が生じるため厳密には一致させることはできず、やや残念な形になってしまう。
+しかしながら、面倒ともいいながら実装はそれほど難しくはない。似たようなものが既に存在したため深くは解説しないが、kazatsuyu氏の
+
+ - [非型テンプレートパラメータに浮動小数点数を渡す方法](https://qiita.com/kazatsuyu/items/1656e90b8ac0d999f12d)
+
+を参考にさせていただいた。
+とりあえず、型特性の定義をまずは示す。
+
+```C++
+	template <>
+	struct numeric_traits<float> {
+		using type = float;
+		using int_type = int32_t;				//浮動小数点型と同じもしくはそれ以上のビット数をもつ整数型
+
+		static constexpr int_type digits = 24;
+		static constexpr int_type digits10 = 6;
+		static constexpr int_type fraction_digits = 23;				//符号ビットを除いた仮数部のビット数
+		static constexpr int_type exponent_digits = 8;				//指数部のビット数
+		static constexpr int_type sign_mask = int_type(1) << (fraction_digits + exponent_digits);		//符号部マスク
+		static constexpr int_type fraction_mask = (int_type(1) << fraction_digits) - 1;					//仮数部マスク
+		static constexpr int_type exponent_mask = (int_type(1) << exponent_digits) - 1;					//指数部マスク
+		static constexpr int_type exponent_bias = (1 << (exponent_digits - 1)) - 1;						//指数部のバイアス
+
+		//演算誤差をどうにかしたいところ・・・
+		static constexpr type norm() { return ldexp2(1.f, 1 - exponent_bias); }								//最小の正規化数
+		static constexpr type denorm() { return ldexp2(1.f, 1 - exponent_bias - fraction_digits); }			//最小の非正規化数
+		static constexpr type positive_infinity() noexcept { return IMATH_INFINITYF; }
+		static constexpr type negative_infinity() noexcept { return -IMATH_INFINITYF; }
+		static constexpr type nan() noexcept { return IMATH_NANF; }
+		static constexpr type epsilon() noexcept { return ldexp2(1.f, 1 - (fraction_digits + 1)); }
+
+		static constexpr bool is_positive_infinity(type x) { return x == positive_infinity(); }
+		static constexpr bool is_negative_infinity(type x) { return x == negative_infinity(); }
+		static constexpr bool is_nan(type x) { return x != x; }
+	};
+	template <>
+	struct numeric_traits<int32_t> {
+		using type = int32_t;
+		using float_type = float;				//整数型と同じもしくはそれ以下のビット数をもつ浮動小数点型
+		using float_trait = numeric_traits<float_type>;
+
+		//quiet NaN(符号部0かつ指数部全1かつ仮数部が0以外)
+		static constexpr type quiet_nan = (float_trait::exponent_mask << float_trait::fraction_digits) | float_trait::fraction_mask;
+		//signaling NaN(符号部1かつ指数部全1かつ仮数部が0以外)
+		static constexpr type signaling_nan = (1 << 31) | (float_trait::exponent_mask << float_trait::fraction_digits) | float_trait::fraction_mask;
+		//正の無限大(符号部0かつ指数部全1かつ仮数部0)
+		static constexpr type positive_infinity = float_trait::exponent_mask << float_trait::fraction_digits;
+		//負の無限大(符号部1かつ指数部全1かつ仮数部0)
+		static constexpr type negative_infinity = (1 << 31) | (float_trait::exponent_mask << float_trait::fraction_digits);
+
+		static constexpr bool is_positive_infinity(type x) { return x == positive_infinity; }
+		static constexpr bool is_negative_infinity(type x) { return x == negative_infinity; }
+		static constexpr bool is_quiet_nan(type x) { return ((x ^ quiet_nan) <= float_trait::fraction_mask) && ((x ^ quiet_nan) > 0); }
+		static constexpr bool is_signaling_nan(type x) { return ((x ^ signaling_nan) <= float_trait::fraction_mask) && ((x ^ signaling_nan) > 0); }
+		static constexpr bool is_nan(type x) { return is_quiet_nan(x) || is_signaling_nan(x); }
+	};
+```
+
+全部を示すと冗長になるので一部のみを抜粋した。ちなみに、`numeric_traits`は標準ライブラリでいう`numeric_limits`みたいなやつである。そのうち判定系以外は定数で扱いたいと思っている。
+これを用いることで、浮動小数点型と整数型間の変換する関数を定義することができる。
+
+```C++
+	//浮動小数点型を同じかそれ以上のビット数の整数型へとビット情報を保持したまま変換
+	template<class Float>
+	constexpr auto float_to_int(Float val) -> decltype(typename numeric_traits<Float>::int_type()) {
+		using float_traits = numeric_traits<Float>;
+		using int_type = typename float_traits::int_type;
+		using int_traits = numeric_traits<int_type>;
+
+		//非数の場合(全部qNaNとして扱う)
+		if (float_traits::is_nan(val)) return int_traits::quiet_nan;
+		//正の無限大の場合
+		if (float_traits::is_positive_infinity(val)) return int_traits::positive_infinity;
+		//負の無限大の場合
+		if (float_traits::is_negative_infinity(val)) return int_traits::negative_infinity;
+
+		//符号部マスクの構築
+		int_type sign = (val < 0) * float_traits::sign_mask;
+		if (sign) val = -val;
+
+		//非正規化数の場合(0でいいと思う)
+		if (val < float_traits::norm()) return 0;
+
+		//仮数部を仮数部ビット長整数として得る(指数部は予め仮数部ビット長整数分の桁数の補正)
+		int_type exponent = float_traits::exponent_bias + float_traits::fraction_digits;
+		while (val >= (1 << (numeric_traits<Float>::fraction_digits + 1))) { val *= 0.5; ++exponent; }
+		while (val < (1 << (numeric_traits<Float>::fraction_digits))) { val *= 2; --exponent; }
+
+		//符号部と指数部と仮数部を設定して返す
+		return (sign | (exponent << float_traits::fraction_digits) | (static_cast<int_type>(val) & float_traits::fraction_mask));
+	}
+	//整数型を同じかそれ以下のビット数の浮動小数点型へとビット情報を保持したまま変換
+	template<class Int>
+	constexpr auto int_to_float(Int val) -> decltype(typename numeric_traits<Int>::float_type()) {
+		using int_traits = numeric_traits<Int>;
+		using float_type = typename int_traits::float_type;
+		using float_traits = numeric_traits<float_type>;
+		using int_type= typename float_traits::int_type;			//Intが符号無し整数の場合も考慮して定義
+
+		//非数の場合(全部qNaNとして扱う)
+		if (int_traits::is_nan(val)) return float_traits::nan();
+		//正の無限大の場合
+		if (int_traits::is_positive_infinity(val)) return float_traits::positive_infinity();
+		//負の無限大の場合
+		if (int_traits::is_negative_infinity(val)) return float_traits::negative_infinity();
+
+		//符号部と指数部と仮数部の取得
+		int_type sign = !!(val & float_traits::sign_mask);
+		int_type exponent = ((val >> float_traits::fraction_digits) & float_traits::exponent_mask);
+		int_type fraction = val & float_traits::fraction_mask;
+
+		//非正規化数の場合(0でいいと思う)
+		if ((exponent == 0) && (fraction != 0)) return 0;
+
+		//float_to_intと同様のバイアスの補正
+		exponent -= float_traits::exponent_bias + float_traits::fraction_digits;
+		//1.fractionとなるように復元
+		fraction |= int_type(1) << float_traits::fraction_digits;
+
+		float_type temp = ldexp2<float_type>(fraction, exponent);
+		return (sign) ? -temp : temp;
+	}
+```
+
+後は、素直に`Make_parameter`を実装する。
+
+```C++
+	//浮動小数点パラメータの場合
+#define MAKE_PARAMETER(NAME)\
+	template <typename numeric_traits<NAME>::int_type Val>\
+	struct make_parameter<NAME, index_tuple<typename numeric_traits<NAME>::int_type, Val>> {\
+		using type = NAME;\
+		static constexpr type value = int_to_float(Val);\
+	};
+	MAKE_PARAMETER(float);
+	MAKE_PARAMETER(double);
+#undef MAKE_PARAMETER
+	template <class Float, typename numeric_traits<Float>::int_type Val>
+	using float_parameter = make_parameter<Float, index_tuple<typename numeric_traits<Float>::int_type, Val>>;
+```
+
+今の規格では`long double`は知らない子扱いしている。
+
+##その他の型
+一般に型というのは整数型か浮動小数点型上で定義されるものだと考えられる。流石にわざわざプレースホルダ等を用いて空集合なるものを定義して適当な代数的構造間との同型写像を定義して「これが整数型だよ！」とかという人はネタ以外の何物でもないだろう(その場合であれば`make_parameter`対応可能であるが)。あと、動的配列とかは原理的に無理。
+とりあえず、例で挙げた複素数型の場合における実装例を示す。そこまで難しくはない。むしろ簡単。
+
+```C++
+	//複素数パラメータの場合
+	template <class T, class Param1, class Param2>
+	struct make_parameter<complex<T>, type_tuple<make_parameter<T, Param1>, make_parameter<T, Param2>>> {
+		using type = complex<T>;
+		static constexpr type value = type(make_parameter<T, Param1>::value, make_parameter<T, Param2>::value);
+	};
+	template <class T, class Re, class Im>
+	using complex_parameter = make_parameter<complex<T>, type_tuple<Re, Im>>;
+```
+
+ただし、宣言が気持ち悪くなるレベルで冗長となる。以下例。
+
+```C++
+	//complex<float>(1.234f,5.678f)を示す型
+	using complex_param = iml::complex_parameter<float, iml::float_parameter<float, iml::float_to_int(1.234f)>, iml::float_parameter<float, iml::float_to_int(5.678f)>>;
+	std::cout << complex_param::value << std::endl;
+```
+
+まぁ、活躍する場面はライブラリ作成における場面くらいだろう。
+
+#単項演算の実装
+単項演算は`make_parameter`内部で型に合わせて実装するだけであるため簡単である。以下は浮動小数点型における単項演算の定義の例である。
+
+```C++
+	//浮動小数点パラメータの場合
+#define MAKE_PARAMETER(NAME)\
+	template <typename numeric_traits<NAME>::int_type Val>\
+	struct make_parameter<NAME, index_tuple<typename numeric_traits<NAME>::int_type, Val>> {\
+		using type = NAME;\
+		using int_type = typename numeric_traits<NAME>::int_type;\
+		static constexpr type value = int_to_float(Val);\
+		auto operator-() const { return make_parameter<NAME, index_tuple<int_type, float_to_int(-value)>>(); }\
+		auto operator+() const { return *this; }\
+	};
+	MAKE_PARAMETER(float);
+	MAKE_PARAMETER(double);
+#undef MAKE_PARAMETER
+```
+
+他の型でも同様にして、再帰的な実装ができる。このとき、整数型に対する`make_parameter`はマクロでまとめて実装したが、符号無し整数と符号あり整数で減算が定義されるか否かが異なるため、マクロを分けて実装する必要がある。
+また、再帰的な実装実装として、複素数型の単項演算の例をも示しておく。
+
+```C++
+	//複素数パラメータの場合
+	template <class T, class Param1, class Param2>
+	struct make_parameter<complex<T>, type_tuple<make_parameter<T, Param1>, make_parameter<T, Param2>>> {
+		using type = complex<T>;
+		static constexpr type value = type(make_parameter<T, Param1>::value, make_parameter<T, Param2>::value);
+		auto operator-() const { return make_parameter<complex<T>, type_tuple<typename decay<decltype(-make_parameter<T, Param1>())>::type, typename decay<decltype(-make_parameter<T, Param2>())>::type>>(); }
+		auto operator+() const { return *this; }
+	};
+```
+
+特に、複素数型であれば添え字演算をも定義しておくと尚良だろう。このような再帰的な実装が2項演算の場合でも基本である。
+自分の中の慣習で`decay`付けたけどこの場合は無くてもいいとは思ってる。
+
+#2項演算の実装
+##基本型の場合
+基本型(≒整数型と浮動小数点型)の場合は極めて単純である。説明するよりも実装を見た方が早いだろう。
+
+```C++
+	template <class Int1, Int1 Val1, class Int2, Int2 Val2>
+	auto operator+(int_parameter<Int1, Val1>, int_parameter<Int2, Val2>) {
+		constexpr auto temp = Val1 + Val2;
+		using temp_type = typename decay<decltype(temp)>::type;
+		return int_parameter<temp_type, temp>();
+	}
+	template <class Int, Int Val1, class Float, typename numeric_traits<Float>::int_type Val2>
+	auto operator+(int_parameter<Int, Val1>, float_parameter<Float, Val2>) {
+		constexpr auto temp = Val1 + int_to_float(Val2);
+		using temp_type = typename decay<decltype(temp)>::type;
+		return float_parameter<temp_type, float_to_int(temp)>();
+	}
+	template <class Float, typename numeric_traits<Float>::int_type Val1, class Int, Int Val2>
+	auto operator+(float_parameter<Float, Val1>, int_parameter<Int, Val2>) {
+		constexpr auto temp = int_to_float(Val1) + Val2;
+		using temp_type = typename decay<decltype(temp)>::type;
+		return float_parameter<temp_type, float_to_int(temp)>();
+	}
+	template <class Float1, typename numeric_traits<Float1>::int_type Val1, class Float2, typename numeric_traits<Float2>::int_type Val2>
+	auto operator+(float_parameter<Float1, Val1>, float_parameter<Float2, Val2>) {
+		constexpr auto temp = int_to_float(Val1) + int_to_float(Val2);
+		using temp_type = typename decay<decltype(temp)>::type;
+		return float_parameter<temp_type, float_to_int(temp)>();
+	}
+```
+
+あくまでもこれは加算の場合の例であるが、全ての演算においてこのような実装となる。
+場合によっては整数型同士の除算で浮動小数点型として演算結果を得たい場合もあるだろう。その場合には以下のような型を実装しておくといいだろう。
+
+```C++
+	//除算実行時に自動的に浮動小数点へのキャストを実行する整数型(Float:キャスト先の型)
+	template <class T, T Val, class Float>
+	using int_parameter2 = make_parameter<T, type_tuple<index_tuple<T, Val>, Float>>;
+```
+
+このように明確に別の型を示すように部分特殊化を定義すれば型推論も問題ない。
+
+##ユーザ実装型の場合
+要は複素数とか行列型とかの場合。なぜわざわざ基本型とで分けたかというと、トリッキーな2項演算の定義方法をした型についての`make_parameter`の2項演算の定義は困難になるからである。
+しかしながら、実装は難しくない。複素数型であるならば複素数型の2項演算と一緒に`make_parameter`の2項演算を定義するだけである。とりあえず、加算の場合の以下例。
+
+```C++
+	template <class T>
+	auto operator+(complex<T>, complex<T>) {
+		//略
+	}
+	template <class T, class Re1, class Im1, class Re2, class Im2>
+	auto operator+(complex_parameter<T, Re1, Im1>, complex_parameter<T, Re2, Im2>) {
+		using real_type = typename decay<decltype(Re1() + Re2())>::type;
+		using image_type = typename decay<decltype(Im1() + Im2())>::type;
+		return complex_parameter<T, real_type, image_type>();
+	}
+```
+
+トリッキーな2項演算の定義の仕方については今回の記事の本意から外れてしまうため特にやらない。とりあえず2項演算はセットで定義するといったイメージで。
+
+#終わりに
+Constant expressionなことをやる人にとっては非常に役立つと思う。実際、[例の数式処理のやつ](https://qiita.com/168irohairoha/items/beecd2e12a56dd0eda3c)で使うために作ったようなもの。
+今回はそれなりに簡単だったと思う。
+多分もう誰かがやってるような気がするけどまぁいいか。
+
+#※追記
+そういえば配列型についての`make_parameter`についてやっていなかったためやっておく。あと、`make_parameter`の名前が気に入らなかったため`type_parameter`に名称を変更した。
+
+さて、配列型の実装方法であるが、これが意外に面倒である。単純な1次元配列であれば簡単であるが、多次元配列を考える場合は非常に面倒なことになる。多次元配列なんて必要ないだろというのもあるかもしれないが、テンソルとかが必要となる典型的なものだろう。
+多分、機械学習やってる人ならテンソルくらいは皆知っているはずだと思う。というか、機械学習は幾何学ベースの分野（人によっては統計学ベースだと主張する人もいるが自分は流石に無理があると思ってる）だから実はみんな数学できそう（小並）。だから、Qiitaに数学の記事がもっと増えてもいいと思う。
+
+話が逸れた。
+一般に多次元配列をテンプレート引数として持つことは無理がある。そこで、いつの日か垢抜ける前に書いた
+
+- [C++で多次元配列の表現](https://qiita.com/168irohairoha/items/2eadcb58a135a82d2792)
+
+で書いた`multi_array`を用いる。しかし、ちょっと色々手直ししたため、それに関するコードを示す。
+
+```C++
+	//多次元配列の構築
+	template <class T, class Indices>
+	struct multi_array_impl;
+	template <class T, size_t N>
+	struct multi_array_impl<T, index_tuple<size_t, N>> {
+		using type = T[N];
+	};
+	template <class T, size_t First, size_t... Indices>
+	struct multi_array_impl<T, index_tuple<size_t, First, Indices...>> : multi_array_impl<T[First], index_tuple<size_t, Indices...>> {};
+	template <class T, size_t First, size_t... Indices>
+	struct multi_array : multi_array_impl<T, reverse_index_tuple_t<index_tuple<size_t, First, Indices...>>> {};
+	template <class T, size_t First, size_t... Indices>
+	using multi_array_t = typename multi_array<T, First, Indices...>::type;
+
+
+	//配列の添え字リスト等から次元の取得
+	template <size_t, class>
+	struct dimension_impl;
+	template <size_t Dim>
+	struct dimension_impl<Dim, index_tuple<size_t>> {
+		static_assert(Dim > 0, "0 parameter should not exist.");
+		static constexpr size_t value = Dim;
+	};
+	template <size_t Dim, size_t First, size_t... Indices>
+	struct dimension_impl<Dim, index_tuple<size_t, First, Indices...>> : dimension_impl<Dim*First, index_tuple<size_t, Indices...>> {};
+	template <class>
+	struct dimension;
+	template <size_t First, size_t... Indices>
+	struct dimension<index_tuple<size_t, First, Indices...>> : dimension_impl<First, index_tuple<size_t, Indices...>> {};
+	template <class T>
+	constexpr size_t dimension_v = dimension<T>::value;
+```
+
+最近C++14スタイルな感じに切り替えたからだいぶすっきりしている。
+また、配列型を示す`type_parameter`は以下のようにして構成する。
+
+```C++
+	//配列型パラメータ
+	template <class, class, class, class>
+	struct array_parameter_impl;
+	//T : 配列の生成元となる型, Indices1 : 次元のリスト, Types : 配列のそれぞれの要素, Indices2 : 要素について判定するための補助
+	template <class T, size_t... Indices1, class... Types, size_t... Indices2>
+	struct array_parameter_impl<T, index_tuple<size_t, Indices1...>, type_tuple<Types...>, index_tuple<size_t, Indices2...>> {
+		//identity_tを経由することで配列の次元に対する要素数が一致することを判定
+		using type = type_parameter<multi_array<T, Indices1...>, type_tuple<identity_t<Types, Indices2>...>>;
+	};
+	template <class T, class IndexTuple, class... Types>
+	using array_parameter = typename array_parameter_impl<T, IndexTuple, type_tuple<Types...>, index_range_t<size_t, 0, dimension_v<IndexTuple>>>::type;
+```
+
+ちなみに、`identity`は以下のような構成である。
+
+```C++
+	template<class T, size_t N = 0>
+	struct identity {
+		using type = T;
+		static constexpr size_t value = N;
+	};
+```
+
+そして、実際の`array_parameter `の中身は
+
+```C++
+	template <class T, size_t First, size_t... Indices, class...Types>
+	struct type_parameter<multi_array<T, First,  Indices...>, type_tuple<Types...>> {
+		using type = multi_array_t<T, First, Indices...>;
+		static constexpr type value = { Types::value... };
+	};
+```
+
+となる。自分の環境(Visual Studio 2017)ではなぜか`value`の初期化に失敗する。C++の詳しい仕様は読んでないからわからん。
+
+このとき、添え字アクセスが出来なければならないが、これが面倒である。
+具体的には`N`番目のアクセスをするならば、`Types...`を`First`等分したものの`N`番目を選択するといったものである。というわけで、それ関連の一連のコードを示す。
+
+```C++
+	//array_parameterをN等分する(Cnt1 : 分割した1つ当たりの要素数のカウント, Cnt2 : 現在分割した数のカウント)
+	//(Types : 配列の値リスト, Result : type_tupleによって保持される結果)
+	template <class Array, size_t N, class Types, class Result = type_tuple<type_tuple<>>, size_t Cnt1 = 0, size_t Cnt2 = 0, bool = (Cnt1 == Array::value), bool = (Cnt2 == N)>
+	struct split_array_parameter {};
+	template <class T, size_t... Indices, size_t N, class... Types2, size_t Cnt1, size_t Cnt2>
+	struct split_array_parameter<multi_array<T, Indices...>, N, type_tuple<>, type_tuple<type_tuple<>, Types2...>, Cnt1, Cnt2, false, true> {
+		using type = reverse_type_tuple_t<type_tuple<Types2...>>;
+	};
+	template <class T, size_t... Indices, size_t N, class... Types1, class... Types2, class... Types3, size_t Cnt1, size_t Cnt2>
+	struct split_array_parameter<multi_array<T, Indices...>, N, type_tuple<Types1...>, type_tuple<type_tuple<Types2...>, Types3...>, Cnt1, Cnt2, true, false>
+		: split_array_parameter<multi_array<T, Indices...>, N, type_tuple<Types1...>, type_tuple<type_tuple<>, array_parameter<T, index_tuple<size_t, Indices...>, Types2...>, Types3...>, 0, Cnt2 + 1> {};
+	template <class T, size_t... Indices, size_t N, class FirstT, class... Types1, class... Types2, class... Types3, size_t Cnt1, size_t Cnt2>
+	struct split_array_parameter<multi_array<T, Indices...>, N, type_tuple<FirstT, Types1...>, type_tuple<type_tuple<Types2...>, Types3...>, Cnt1, Cnt2, false, false>
+		: split_array_parameter<multi_array<T, Indices...>, N, type_tuple<Types1...>, type_tuple<type_tuple<Types2..., FirstT>, Types3...>, Cnt1 + 1, Cnt2> {};
+
+	//1次元配列
+	template <class T, size_t First, class... Types>
+	struct type_parameter<multi_array<T, First>, type_tuple<Types...>> {
+		using type = multi_array_t<T, First>;
+		//static constexpr type value = { (Types::value)... };
+
+		template <class T, T Val, class = typename enable_if<(Val >= 0) && (Val < First)>::type>
+		auto operator[](int_parameter<T, Val>) const { return at_type_t<Val, Types...>(); }
+	};
+	//2次元以上の配列
+	template <class T, size_t First, size_t Second, size_t... Indices, class... Types>
+	struct type_parameter<multi_array<T, First, Second, Indices...>, type_tuple<Types...>> {
+		using type = multi_array_t<T, First, Second, Indices...>;
+		//static constexpr type value = { (Types::value)... };
+
+		template <class T, T Val, class = typename enable_if<(Val >= 0) && (Val < First)>::type>
+		auto operator[](int_parameter<T, Val>) const {
+			using split_type = typename split_array_parameter<multi_array<T, Second, Indices...>, First, type_tuple<Types...>>::type;
+			return at_type_tuple_t<Val, split_type>();
+		}
+	};
+```
+
+1次元配列場合のみお完全に特殊な場合として定義をしてもいいが、1次元配列と2次元以上の配列で差別化をするのは個人的に良くないと思うため統一した構文を採用している。
